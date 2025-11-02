@@ -1457,6 +1457,7 @@ COMMANDS_MAPPING: dict[str, Callable[[BotoClient, Dict[str, Any]], CommandResult
     "aws-ec2-snapshot-attribute-modify": EC2.modify_snapshot_attribute_command,
     "aws-ec2-image-attribute-modify": EC2.modify_image_attribute_command,
     "aws-ec2-security-group-ingress-revoke": EC2.revoke_security_group_ingress_command,
+    "aws-ec2-security-group-ingress-revoke-quick-action": EC2.revoke_security_group_ingress_command,
     "aws-ec2-security-group-ingress-authorize": EC2.authorize_security_group_ingress_command,
     "aws-ec2-security-group-egress-revoke": EC2.revoke_security_group_egress_command,
     "aws-ec2-security-group-create": EC2.create_security_group_command,

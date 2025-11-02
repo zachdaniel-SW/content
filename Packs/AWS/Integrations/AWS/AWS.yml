@@ -1920,6 +1920,56 @@ script:
       description: The ID of the security group to delete (e.g., sg-12345678). Required if group_name is not provided.
     - name: group_name
       description: The name of the security group to delete. Required if group_id is not provided. Note that you can’t reference a security group for EC2-VPC by name.
+
+  - name: aws-ec2-security-group-ingress-revoke-quick-action
+    description: Remove the security group ingress rule, effectively blocking all inbround traffic from the internet.
+    prettyname: Revoke EC2 Ingress Rule
+    hidden: true
+    quickaction: true
+    arguments:
+      - name: account_id
+        description: The AWS account ID.
+        prettyname: Account ID
+        required: true
+        prettypredefined:
+          Account ID: ${asset.xdm.asset.realm}
+      - name: region
+        description: The AWS region.
+        prettyname: Region
+        required: true
+        prettypredefined:
+          Region: ${asset.xdm.asset.cloud.region}
+      - name: group_id
+        prettyname: Security Group ID
+        description: The ID of the security group.
+        required: true
+        prettypredefined:
+          Security Group ID: ${asset.xdm.asset.strong_id}
+      - name: protocol
+        prettyname: Protocol
+        description: The IP protocol name (tcp, udp, icmp) or number
+        required: true
+        prettypredefined:
+          Protocol: ${asset.xdm.asset.raw_fields.Platform Discovery.ipPermissions.ipProtocol}
+      - name: cidr
+        prettyname: CIDR
+        description: The CIDR IP address range.
+        required: true
+        prettypredefined:
+          CIDR: ${asset.xdm.asset.raw_fields.Platform Discovery.ipPermissions.ipRanges.[0]}
+      - name: from_port
+        prettyname: From Port
+        description: If the protocol is TCP or UDP, this is the start of the port range. If the protocol is ICMP, this is the ICMP type or -1 (all ICMP types).
+        required: true
+        prettypredefined:
+          From Port: ${asset.xdm.asset.raw_fields.Platform Discovery.ipPermissions.fromPort}
+      - name: to_port
+        prettyname: To Port
+        description: If the protocol is TCP or UDP, this is the end of the port range. If the protocol is ICMP, this is the ICMP code or -1 (all ICMP codes).
+        required: true
+        prettypredefined:
+          To Port: ${asset.xdm.asset.raw_fields.Platform Discovery.ipPermissions.toPort}
+
   - name: aws-ec2-security-groups-describe
     description: Describes the specified security groups or all of your security groups. Returns detailed information about security groups including their rules, tags, and associated VPC information.
     arguments:
@@ -2020,6 +2070,7 @@ script:
   subtype: python3
   dockerimage: demisto/boto3py3:1.0.0.4688278
 fromversion: 5.5.0
+supportsquickactions: true
 tests:
 - No test - No playbook part of this release.
 sectionOrder:
