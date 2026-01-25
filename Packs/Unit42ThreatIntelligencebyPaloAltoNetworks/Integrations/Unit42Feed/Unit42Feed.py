@@ -9,6 +9,12 @@ DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 INTEGRATION_NAME = "Unit 42 Feed"
 API_LIMIT = 5000
 TOTAL_INDICATOR_LIMIT = 100000
+DEFAULT_LIMIT = 100000
+
+# Priority order for fetching (highest to lowest) - BOTTOM-TO-TOP approach
+# Threat Objects first, Files last (since files are largest)
+INDICATOR_TYPE_PRIORITY = ["IP", "Domain", "URL", "File"]
+# Note: Threat Objects are handled separately in feed_types
 
 # API endpoints
 BASE_URL = "https://prod-us.tas.crtx.paloaltonetworks.com"
@@ -766,6 +772,149 @@ def parse_threat_objects(threat_objects_data: list, feed_tags: list = [], tlp_co
     return threat_objects
 
 
+def sort_indicator_types_by_priority(indicator_types: list) -> list:
+    """
+    Sort indicator types by priority (bottom-to-top: IPs first, Files last).
+
+    Args:
+        indicator_types: List of indicator types to sort
+
+    Returns:
+        Sorted list based on INDICATOR_TYPE_PRIORITY (IPs → Domains → URLs → Files)
+    """
+    # Create priority map (lower index = higher priority)
+    priority_map = {type_: idx for idx, type_ in enumerate(INDICATOR_TYPE_PRIORITY)}
+
+    # Sort by priority (IPs=0, Domains=1, URLs=2, Files=3)
+    return sorted(indicator_types, key=lambda t: priority_map.get(t, len(INDICATOR_TYPE_PRIORITY)))
+
+
+def fetch_indicator_type(
+    client: Client, indicator_type: str, limit: int, start_time: str, feed_tags: list, tlp_color: str | None
+) -> list:
+    """
+    Fetch indicators for a specific type with pagination and limit enforcement.
+
+    Args:
+        client: Client object
+        indicator_type: Type to fetch (File, IP, URL, Domain)
+        limit: Maximum number to fetch for this type
+        start_time: Start time for fetching
+        feed_tags: Tags to add to indicators
+        tlp_color: TLP color
+
+    Returns:
+        List of indicators (count <= limit)
+    """
+    indicators = []
+    next_page_token = None
+
+    while len(indicators) < limit:
+        # Calculate how many more we need
+        remaining = limit - len(indicators)
+        page_limit = min(API_LIMIT, remaining)
+
+        demisto.debug(f"UNIT42FEED: Fetching {indicator_type} page " f"(page_limit={page_limit}, total_so_far={len(indicators)})")
+
+        # Make API call
+        response = client.get_indicators(
+            indicator_types=[indicator_type], limit=page_limit, start_time=start_time, next_page_token=next_page_token
+        )
+
+        # Parse response
+        if not response or not isinstance(response, dict):
+            demisto.debug(f"UNIT42FEED: Invalid response for {indicator_type}, stopping")
+            break
+
+        data = response.get("data", [])
+        if not data or not isinstance(data, list):
+            demisto.debug(f"UNIT42FEED: No more data for {indicator_type}, stopping")
+            break
+
+        # Parse and add indicators
+        page_indicators = parse_indicators(data, feed_tags, tlp_color)
+        indicators.extend(page_indicators)
+
+        demisto.debug(f"UNIT42FEED: Parsed {len(page_indicators)} {indicator_type} indicators " f"(total: {len(indicators)})")
+
+        # Check for next page
+        metadata = response.get("metadata", {})
+        next_page_token = metadata.get("next_page_token") if isinstance(metadata, dict) else None
+
+        if not next_page_token:
+            demisto.debug(f"UNIT42FEED: No more pages for {indicator_type}")
+            break
+
+        # Safety check: if we got fewer results than requested, we're at the end
+        if len(page_indicators) < page_limit:
+            demisto.debug("UNIT42FEED: Got fewer results than requested, stopping pagination")
+            break
+
+    # Ensure we don't exceed the limit (safety check)
+    return indicators[:limit]
+
+
+def fetch_threat_objects_with_limit(client: Client, limit: int, feed_tags: list, tlp_color: str | None) -> list:
+    """
+    Fetch threat objects with pagination and limit enforcement.
+
+    Args:
+        client: Client object
+        limit: Maximum number to fetch
+        feed_tags: Tags to add to threat objects
+        tlp_color: TLP color
+
+    Returns:
+        List of threat objects (count <= limit)
+    """
+    threat_objects = []
+    next_page_token = None
+
+    while len(threat_objects) < limit:
+        # Calculate how many more we need
+        remaining = limit - len(threat_objects)
+        page_limit = min(API_LIMIT, remaining)
+
+        demisto.debug(
+            f"UNIT42FEED: Fetching threat objects page " f"(page_limit={page_limit}, total_so_far={len(threat_objects)})"
+        )
+
+        # Make API call
+        response = client.get_threat_objects(limit=page_limit, next_page_token=next_page_token)
+
+        # Parse response
+        if not response or not isinstance(response, dict):
+            demisto.debug("UNIT42FEED: Invalid response for threat objects, stopping")
+            break
+
+        data = response.get("data", [])
+        if not data or not isinstance(data, list):
+            demisto.debug("UNIT42FEED: No more threat objects data, stopping")
+            break
+
+        # Parse and add threat objects
+        page_objects = parse_threat_objects(data, feed_tags, tlp_color)
+        threat_objects.extend(page_objects)
+
+        demisto.debug(f"UNIT42FEED: Parsed {len(page_objects)} threat objects " f"(total: {len(threat_objects)})")
+
+        # Check for next page
+        metadata = response.get("metadata", {})
+        next_page_token = metadata.get("next_page_token") if isinstance(metadata, dict) else None
+
+        if not next_page_token:
+            demisto.debug("UNIT42FEED: No more pages for threat objects")
+            break
+
+        # Safety check
+        if len(page_objects) < page_limit:
+            demisto.debug("UNIT42FEED: Got fewer results than requested, stopping pagination")
+            break
+
+    # Ensure we don't exceed the limit
+    return threat_objects[:limit]
+
+
 def test_module(client: Client) -> str:
     """Builds the iterator to check that the feed is accessible.
     Args:
@@ -783,189 +932,95 @@ def test_module(client: Client) -> str:
 
 
 def fetch_indicators(client: Client, params: dict, current_time: datetime) -> list:
-    """Retrieves indicators from the feed
+    """Retrieves indicators from the feed with global limit enforcement.
 
     Args:
         client: Client object with request
         params: demisto.params()
         current_time: The current fetch time.
     Returns:
-        List. Processed indicators from feed.
+        List. Processed indicators from feed (total count <= limit).
     """
-    indicators = []
+    all_indicators = []
 
-    # Get indicator types from params
+    # Parse and validate limit
+    limit = arg_to_number(params.get("limit", DEFAULT_LIMIT))
+    if not limit or limit <= 0:
+        limit = DEFAULT_LIMIT
+    if limit > TOTAL_INDICATOR_LIMIT:
+        demisto.debug(f"UNIT42FEED: Requested limit {limit} exceeds maximum {TOTAL_INDICATOR_LIMIT}, using maximum")
+        limit = TOTAL_INDICATOR_LIMIT
+
+    remaining_limit = limit
+
+    # Get configuration
     feed_types = argToList(params.get("feed_types"))
     indicator_types = argToList(params.get("indicator_types"))
-    demisto.debug(f"UNIT42FEED_DEBUG: Feed types configured: {feed_types}")
-    demisto.debug(f"UNIT42FEED_DEBUG: Indicator types configured: {indicator_types}")
+    feed_tags = argToList(params.get("feedTags", []))
+    tlp_color = params.get("tlp_color")
 
+    # Get start time
     default_start = (current_time - timedelta(hours=24)).strftime(DATE_FORMAT)
     last_run = demisto.getLastRun() or {}
     start_time = last_run.get("last_successful_run", default_start)
-    demisto.debug(f"UNIT42FEED_DEBUG: Current time: {current_time.strftime(DATE_FORMAT)}")
-    demisto.debug(f"UNIT42FEED_DEBUG: Default start time: {default_start}")
-    demisto.debug(f"UNIT42FEED_DEBUG: Last run data: {last_run}")
-    demisto.debug(f"UNIT42FEED_DEBUG: Using start time: {start_time}")
 
-    feed_tags = argToList(params.get("feedTags", []))
-    tlp_color = params.get("tlp_color")
-    demisto.debug(f"UNIT42FEED_DEBUG: Feed tags: {feed_tags}")
-    demisto.debug(f"UNIT42FEED_DEBUG: TLP color: {tlp_color}")
+    demisto.debug(f"UNIT42FEED: Starting fetch with limit={limit}, feed_types={feed_types}")
+    demisto.debug(f"UNIT42FEED: Indicator types: {indicator_types}, start_time={start_time}")
 
-    if "Indicators" in feed_types:
-        # Get indicators from the API
-        demisto.debug(
-            f"UNIT42FEED_DEBUG: Making initial API call to get_indicators with types={indicator_types}, start_time={start_time}"
+    # FETCH THREAT OBJECTS FIRST (if enabled) - Highest Priority
+    if "Threat Objects" in feed_types and remaining_limit > 0:
+        demisto.debug(f"UNIT42FEED: Fetching Threat Objects FIRST (remaining limit: {remaining_limit})")
+
+        threat_objs = fetch_threat_objects_with_limit(
+            client=client, limit=remaining_limit, feed_tags=feed_tags, tlp_color=tlp_color
         )
-        response = client.get_indicators(indicator_types=indicator_types, start_time=start_time)
-        demisto.debug(f"UNIT42FEED_DEBUG: Initial API response received. Response type: {type(response)}")
 
-        if response and isinstance(response, dict):
-            demisto.debug(f"UNIT42FEED_DEBUG: Response keys: {list(response.keys())}")
-            demisto.debug(f"UNIT42FEED_DEBUG: Response has data: {len(response.get('data', []))}")
-            if response.get("data"):
-                demisto.debug(
-                    f"UNIT42FEED_DEBUG: Data type: {type(response.get('data'))}, Data length: {len(response.get('data', []))}"
-                )
+        fetched_count = len(threat_objs)
+        all_indicators.extend(threat_objs)
+        remaining_limit -= fetched_count
 
-        # Parse indicators
-        if response and isinstance(response, dict) and response.get("data"):
-            data = response.get("data", [])
-            if isinstance(data, list):
-                initial_count = len(data)
-                demisto.debug(f"UNIT42FEED_DEBUG: Parsing {initial_count} indicators from initial response")
-                indicators.extend(parse_indicators(data, feed_tags, tlp_color))
-                demisto.debug(
-                    f"UNIT42FEED_DEBUG: Successfully parsed {initial_count} indicators. "
-                    f"Total indicators so far: {len(indicators)}"
-                )
+        demisto.debug(
+            f"UNIT42FEED: Fetched {fetched_count} threat objects. "
+            f"Total: {len(all_indicators)}/{limit}, Remaining: {remaining_limit}"
+        )
 
-                # Handle pagination if needed
-                metadata = response.get("metadata", {})
-                next_page_token = metadata.get("next_page_token") if isinstance(metadata, dict) else None
-                demisto.debug(f"UNIT42FEED_DEBUG: Metadata: {metadata}")
-                demisto.debug(f"UNIT42FEED_DEBUG: Next page token: {next_page_token}")
+    # FETCH INDICATORS (if enabled) - After Threat Objects
+    if "Indicators" in feed_types and remaining_limit > 0:
+        # Sort indicator types by priority (IPs first, Files last - bottom-to-top)
+        sorted_types = sort_indicator_types_by_priority(indicator_types)
+        demisto.debug(f"UNIT42FEED: Fetching indicators in priority order (bottom-to-top): {sorted_types}")
 
-                # Keep track of total indicator count (starts at API_LIMIT because one call already completed)
-                indicator_count = API_LIMIT
-                page_number = 1
-                while next_page_token and indicator_count < TOTAL_INDICATOR_LIMIT:
-                    page_number += 1
-                    demisto.debug(f"UNIT42FEED_DEBUG: Fetching page {page_number} with token: {next_page_token[:50]}...")
-                    # Get next page of indicators
-                    response = client.get_indicators(
-                        indicator_types=indicator_types, start_time=start_time, next_page_token=next_page_token
-                    )
-                    demisto.debug(f"UNIT42FEED_DEBUG: Page {page_number} response received. Response type: {type(response)}")
+        for ind_type in sorted_types:
+            if remaining_limit <= 0:
+                demisto.debug("UNIT42FEED: Global limit reached. Skipping remaining indicator types.")
+                break
 
-                    if response and isinstance(response, dict) and response.get("data"):
-                        data = response.get("data", [])
-                        if isinstance(data, list):
-                            page_count = len(data)
-                            demisto.debug(f"UNIT42FEED_DEBUG: Page {page_number} contains {page_count} indicators")
-                            indicators.extend(parse_indicators(data, feed_tags, tlp_color))
-                            demisto.debug(
-                                f"UNIT42FEED_DEBUG: Successfully parsed page {page_number}. "
-                                f"Total indicators so far: {len(indicators)}"
-                            )
-                        metadata = response.get("metadata", {})
-                        next_page_token = metadata.get("next_page_token") if isinstance(metadata, dict) else None
-                        demisto.debug(
-                            f"UNIT42FEED_DEBUG: Page {page_number} "
-                            f"next token: {next_page_token[:50] if next_page_token else None}..."
-                        )
-                        # increment indicator_count by max number of objects fetches in single call
-                        indicator_count += API_LIMIT
-                        demisto.debug(f"UNIT42FEED_DEBUG: Indicator count tracker: {indicator_count}/{TOTAL_INDICATOR_LIMIT}")
-                    else:
-                        demisto.debug(f"UNIT42FEED_DEBUG: Page {page_number} response invalid or empty, breaking pagination loop")
-                        break
+            demisto.debug(f"UNIT42FEED: Fetching {ind_type} (remaining limit: {remaining_limit})")
 
-                demisto.debug(f"UNIT42FEED_DEBUG: Completed indicators pagination. Total pages fetched: {page_number}")
-            else:
-                demisto.debug("UNIT42FEED_DEBUG: Initial response data is not a list")
-        else:
-            demisto.debug("UNIT42FEED_DEBUG: Initial response is invalid or has no data")
+            # Fetch this indicator type
+            type_indicators = fetch_indicator_type(
+                client=client,
+                indicator_type=ind_type,
+                limit=remaining_limit,
+                start_time=start_time,
+                feed_tags=feed_tags,
+                tlp_color=tlp_color,
+            )
 
-    if "Threat Objects" in feed_types and start_time:
-        demisto.debug("UNIT42FEED_DEBUG: Processing Threat Objects feed type")
-        demisto.debug("UNIT42FEED_DEBUG: Making initial API call to get_threat_objects")
-        response = client.get_threat_objects()
-        demisto.debug(f"UNIT42FEED_DEBUG: Threat objects initial API response received. Response type: {type(response)}")
+            fetched_count = len(type_indicators)
+            all_indicators.extend(type_indicators)
+            remaining_limit -= fetched_count
 
-        if response and isinstance(response, dict):
-            demisto.debug(f"UNIT42FEED_DEBUG: Threat objects response keys: {list(response.keys())}")
-            demisto.debug(f"UNIT42FEED_DEBUG: Threat objects response has data: {len(response.get('data', []))}")
-            if response.get("data"):
-                demisto.debug(
-                    f"UNIT42FEED_DEBUG: Threat objects data type: {type(response.get('data'))}, "
-                    f"Data length: {len(response.get('data', []))}"
-                )
+            demisto.debug(
+                f"UNIT42FEED: Fetched {fetched_count} {ind_type} indicators. "
+                f"Total: {len(all_indicators)}/{limit}, Remaining: {remaining_limit}"
+            )
 
-        # Parse threat objects
-        if response and isinstance(response, dict) and response.get("data"):
-            data = response.get("data", [])
-            if isinstance(data, list):
-                initial_count = len(data)
-                demisto.debug(f"UNIT42FEED_DEBUG: Parsing {initial_count} threat objects from initial response")
-                indicators.extend(parse_threat_objects(data, feed_tags, tlp_color))
-                demisto.debug(
-                    f"UNIT42FEED_DEBUG: Successfully parsed {initial_count} threat objects. "
-                    f"Total indicators so far: {len(indicators)}"
-                )
+    demisto.info(
+        f"UNIT42FEED: Fetch complete. Total indicators: {len(all_indicators)} " f"(limit: {limit}, remaining: {remaining_limit})"
+    )
 
-                # Handle pagination if needed
-                metadata = response.get("metadata", {})
-                next_page_token = metadata.get("next_page_token") if isinstance(metadata, dict) else None
-                demisto.debug(f"UNIT42FEED_DEBUG: Threat objects metadata: {metadata}")
-                demisto.debug(f"UNIT42FEED_DEBUG: Threat objects next page token: {next_page_token}")
-
-                page_number = 1
-                while next_page_token:
-                    page_number += 1
-                    demisto.debug(
-                        f"UNIT42FEED_DEBUG: Fetching threat objects page {page_number} with token: {next_page_token[:50]}..."
-                    )
-                    # Get next page of threat objects
-                    response = client.get_threat_objects(next_page_token=next_page_token)
-                    demisto.debug(
-                        f"UNIT42FEED_DEBUG: Threat objects page {page_number} response received. Response type: {type(response)}"
-                    )
-
-                    if response and isinstance(response, dict) and response.get("data"):
-                        data = response.get("data", [])
-                        if isinstance(data, list):
-                            page_count = len(data)
-                            demisto.debug(f"UNIT42FEED_DEBUG: Threat objects page {page_number} contains {page_count} objects")
-                            indicators.extend(parse_threat_objects(data, feed_tags, tlp_color))
-                            demisto.debug(
-                                f"UNIT42FEED_DEBUG: Successfully parsed threat objects page {page_number}. "
-                                f"Total indicators so far: {len(indicators)}"
-                            )
-                        metadata = response.get("metadata", {})
-                        next_page_token = metadata.get("next_page_token") if isinstance(metadata, dict) else None
-                        demisto.debug(
-                            f"UNIT42FEED_DEBUG: Threat objects page {page_number} "
-                            f"next token: {next_page_token[:50] if next_page_token else None}..."
-                        )
-                    else:
-                        demisto.debug(
-                            f"UNIT42FEED_DEBUG: Threat objects page {page_number} response invalid or empty, "
-                            f"breaking pagination loop"
-                        )
-                        break
-
-                demisto.debug(f"UNIT42FEED_DEBUG: Completed threat objects pagination. Total pages fetched: {page_number}")
-            else:
-                demisto.debug("UNIT42FEED_DEBUG: Initial threat objects response data is not a list")
-        else:
-            demisto.debug("UNIT42FEED_DEBUG: Threat objects initial response is invalid or has no data")
-    elif "Threat Objects" in feed_types:
-        demisto.debug("UNIT42FEED_DEBUG: Threat Objects in feed_types but start_time is missing, skipping threat objects")
-
-    demisto.debug(f"UNIT42FEED_DEBUG: fetch_indicators completed. Total indicators collected: {len(indicators)}")
-    return indicators
+    return all_indicators
 
 
 def get_indicators_command(client: Client, args: dict, feed_tags: list = [], tlp_color: str | None = None) -> CommandResults:

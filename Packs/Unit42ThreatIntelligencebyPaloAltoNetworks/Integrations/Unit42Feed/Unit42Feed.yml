@@ -24,6 +24,25 @@ configuration:
   defaultvalue: Indicators,Threat Objects
   section: Collect
   advanced: true
+- display: Maximum Indicators Per Fetch
+  name: limit
+  type: 0
+  defaultvalue: '100000'
+  additionalinfo: |-
+    Maximum total number of indicators to fetch across all selected types.
+    The limit is applied globally, not per indicator type.
+    
+    Indicators are fetched in priority order (bottom-to-top):
+    1. Threat Objects (highest priority - fetched first)
+    2. IPs
+    3. Domains
+    4. URLs
+    5. Files (lowest priority - fetched last, largest size)
+    
+    Default: 100,000. Maximum: 100,000.
+  required: false
+  section: Collect
+  advanced: true
 - display: Indicator Types
   additionalinfo: Comma-separated list of indicator types to fetch (File, IP, URL, Domain). If not specified, all indicator types are fetched.
   name: indicator_types
