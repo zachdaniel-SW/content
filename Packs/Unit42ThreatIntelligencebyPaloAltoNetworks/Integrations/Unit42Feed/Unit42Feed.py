@@ -932,26 +932,24 @@ def test_module(client: Client) -> str:
 
 
 def fetch_indicators(client: Client, params: dict, current_time: datetime) -> list:
-    """Retrieves indicators from the feed with global limit enforcement.
+    """Retrieves indicators from the feed with per-type limit enforcement.
 
     Args:
         client: Client object with request
         params: demisto.params()
         current_time: The current fetch time.
     Returns:
-        List. Processed indicators from feed (total count <= limit).
+        List. Processed indicators from feed.
     """
     all_indicators = []
 
-    # Parse and validate limit
-    limit = arg_to_number(params.get("limit", DEFAULT_LIMIT))
-    if not limit or limit <= 0:
-        limit = DEFAULT_LIMIT
-    if limit > TOTAL_INDICATOR_LIMIT:
-        demisto.debug(f"UNIT42FEED: Requested limit {limit} exceeds maximum {TOTAL_INDICATOR_LIMIT}, using maximum")
-        limit = TOTAL_INDICATOR_LIMIT
-
-    remaining_limit = limit
+    # Parse and validate limit (this is PER TYPE)
+    limit_per_type = arg_to_number(params.get("limit", DEFAULT_LIMIT))
+    if not limit_per_type or limit_per_type <= 0:
+        limit_per_type = DEFAULT_LIMIT
+    if limit_per_type > TOTAL_INDICATOR_LIMIT:
+        demisto.debug(f"UNIT42FEED: Requested limit {limit_per_type} exceeds maximum {TOTAL_INDICATOR_LIMIT}, using maximum")
+        limit_per_type = TOTAL_INDICATOR_LIMIT
 
     # Get configuration
     feed_types = argToList(params.get("feed_types"))
@@ -964,44 +962,77 @@ def fetch_indicators(client: Client, params: dict, current_time: datetime) -> li
     last_run = demisto.getLastRun() or {}
     start_time = last_run.get("last_successful_run", default_start)
 
-    demisto.debug(f"UNIT42FEED: Starting fetch with limit={limit}, feed_types={feed_types}")
+    # Calculate total types and validate total doesn't exceed 100K
+    total_types = 0
+    if "Threat Objects" in feed_types:
+        total_types += 1
+    if "Indicators" in feed_types:
+        total_types += len(indicator_types)
+
+    total_expected = limit_per_type * total_types
+    if total_expected > TOTAL_INDICATOR_LIMIT:
+        # Adjust limit_per_type to not exceed total limit
+        limit_per_type = TOTAL_INDICATOR_LIMIT // total_types
+        demisto.debug(
+            f"UNIT42FEED: Total expected ({total_expected}) exceeds maximum {TOTAL_INDICATOR_LIMIT}. "
+            f"Adjusted limit per type to {limit_per_type}"
+        )
+
+    demisto.debug(f"UNIT42FEED: Starting fetch with limit_per_type={limit_per_type}, feed_types={feed_types}")
+    demisto.debug(f"UNIT42FEED: Total types: {total_types}, max total: {limit_per_type * total_types}")
     demisto.debug(f"UNIT42FEED: Indicator types: {indicator_types}, start_time={start_time}")
 
+    # Calculate the actual total limit (min of 100K or limit_per_type * total_types)
+    actual_total_limit = min(TOTAL_INDICATOR_LIMIT, limit_per_type * total_types)
+
+    # Track remaining quota for redistribution to the last type
+    remaining_quota = 0
+
     # FETCH THREAT OBJECTS FIRST (if enabled) - Highest Priority
-    if "Threat Objects" in feed_types and remaining_limit > 0:
-        demisto.debug(f"UNIT42FEED: Fetching Threat Objects FIRST (remaining limit: {remaining_limit})")
+    if "Threat Objects" in feed_types:
+        demisto.debug(f"UNIT42FEED: Fetching Threat Objects (limit: {limit_per_type})")
 
         threat_objs = fetch_threat_objects_with_limit(
-            client=client, limit=remaining_limit, feed_tags=feed_tags, tlp_color=tlp_color
+            client=client, limit=limit_per_type, feed_tags=feed_tags, tlp_color=tlp_color
         )
 
         fetched_count = len(threat_objs)
         all_indicators.extend(threat_objs)
-        remaining_limit -= fetched_count
+
+        # Track unused quota
+        if fetched_count < limit_per_type:
+            remaining_quota += limit_per_type - fetched_count
 
         demisto.debug(
-            f"UNIT42FEED: Fetched {fetched_count} threat objects. "
-            f"Total: {len(all_indicators)}/{limit}, Remaining: {remaining_limit}"
+            f"UNIT42FEED: Fetched {fetched_count}/{limit_per_type} threat objects. Total: {len(all_indicators)}, Unused quota: {remaining_quota}"
         )
 
     # FETCH INDICATORS (if enabled) - After Threat Objects
-    if "Indicators" in feed_types and remaining_limit > 0:
+    if "Indicators" in feed_types:
         # Sort indicator types by priority (IPs first, Files last - bottom-to-top)
         sorted_types = sort_indicator_types_by_priority(indicator_types)
         demisto.debug(f"UNIT42FEED: Fetching indicators in priority order (bottom-to-top): {sorted_types}")
 
-        for ind_type in sorted_types:
-            if remaining_limit <= 0:
-                demisto.debug("UNIT42FEED: Global limit reached. Skipping remaining indicator types.")
-                break
+        for idx, ind_type in enumerate(sorted_types):
+            is_last_type = idx == len(sorted_types) - 1
 
-            demisto.debug(f"UNIT42FEED: Fetching {ind_type} (remaining limit: {remaining_limit})")
+            # For the last type, add remaining quota to allow fetching up to total limit
+            # But ensure we don't exceed the actual_total_limit
+            if is_last_type:
+                max_for_last_type = actual_total_limit - len(all_indicators)
+                type_limit = min(limit_per_type + remaining_quota, max_for_last_type)
+            else:
+                type_limit = limit_per_type
+
+            demisto.debug(
+                f"UNIT42FEED: Fetching {ind_type} (limit: {type_limit}{'[LAST TYPE - includes remaining quota]' if is_last_type else ''})"
+            )
 
             # Fetch this indicator type
             type_indicators = fetch_indicator_type(
                 client=client,
                 indicator_type=ind_type,
-                limit=remaining_limit,
+                limit=type_limit,
                 start_time=start_time,
                 feed_tags=feed_tags,
                 tlp_color=tlp_color,
@@ -1009,16 +1040,16 @@ def fetch_indicators(client: Client, params: dict, current_time: datetime) -> li
 
             fetched_count = len(type_indicators)
             all_indicators.extend(type_indicators)
-            remaining_limit -= fetched_count
+
+            # Track unused quota for non-last types
+            if not is_last_type and fetched_count < limit_per_type:
+                remaining_quota += limit_per_type - fetched_count
 
             demisto.debug(
-                f"UNIT42FEED: Fetched {fetched_count} {ind_type} indicators. "
-                f"Total: {len(all_indicators)}/{limit}, Remaining: {remaining_limit}"
+                f"UNIT42FEED: Fetched {fetched_count}/{type_limit} {ind_type} indicators. Total: {len(all_indicators)}, Unused quota: {remaining_quota}"
             )
 
-    demisto.info(
-        f"UNIT42FEED: Fetch complete. Total indicators: {len(all_indicators)} " f"(limit: {limit}, remaining: {remaining_limit})"
-    )
+    demisto.info(f"UNIT42FEED: Fetch complete. Total indicators: {len(all_indicators)} (limit per type: {limit_per_type})")
 
     return all_indicators
 
