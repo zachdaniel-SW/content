@@ -9,12 +9,11 @@ DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 INTEGRATION_NAME = "Unit 42 Feed"
 API_LIMIT = 5000
 TOTAL_INDICATOR_LIMIT = 100000
-DEFAULT_LIMIT = 100000
+DEFAULT_LIMIT = 20000
 
-# Priority order for fetching (highest to lowest) - BOTTOM-TO-TOP approach
-# Threat Objects first, Files last (since files are largest)
-INDICATOR_TYPE_PRIORITY = ["IP", "Domain", "URL", "File"]
+# Priority order for fetching Threat Objects first Files last
 # Note: Threat Objects are handled separately in feed_types
+INDICATOR_TYPE_PRIORITY = ["IP", "Domain", "URL", "File"]
 
 # API endpoints
 BASE_URL = "https://prod-us.tas.crtx.paloaltonetworks.com"

@@ -32,7 +32,7 @@ configuration:
     4. URLs
     5. Files
     
-    Default: 100,000. Maximum: 100,000.
+    Default: 20,000 (for each type). Maximum (in total for all types): 100,000.
   required: false
   section: Collect
   advanced: true
