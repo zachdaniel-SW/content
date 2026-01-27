@@ -9,7 +9,6 @@ DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 INTEGRATION_NAME = "Unit 42 Feed"
 API_LIMIT = 5000
 TOTAL_INDICATOR_LIMIT = 100000
-DEFAULT_LIMIT = 20000
 
 # Priority order for fetching Threat Objects first Files last
 # Note: Threat Objects are handled separately in feed_types
@@ -773,7 +772,7 @@ def parse_threat_objects(threat_objects_data: list, feed_tags: list = [], tlp_co
 
 def sort_indicator_types_by_priority(indicator_types: list) -> list:
     """
-    Sort indicator types by priority (bottom-to-top: IPs first, Files last).
+    Sort indicator types by priority.
 
     Args:
         indicator_types: List of indicator types to sort
@@ -786,6 +785,46 @@ def sort_indicator_types_by_priority(indicator_types: list) -> list:
 
     # Sort by priority (IPs=0, Domains=1, URLs=2, Files=3)
     return sorted(indicator_types, key=lambda t: priority_map.get(t, len(INDICATOR_TYPE_PRIORITY)))
+
+
+def calculate_limit_per_type(limit: int | None, total_indicator_types: int) -> int:
+    """
+    Calculate the limit per type based on the provided limit and total indicator types.
+
+    Algorithm:
+    - If limit is None or < 0 -> use default limit (TOTAL_INDICATOR_LIMIT / total_indicator_types)
+    - If limit * total_indicator_types > TOTAL_INDICATOR_LIMIT -> use default limit (TOTAL_INDICATOR_LIMIT / total_indicator_types)
+    - Otherwise -> use the provided limit
+
+    Args:
+        limit: The requested limit per type (can be None or negative)
+        total_indicator_types: Total number of indicator types (including threat objects if enabled)
+
+    Returns:
+        Calculated limit per type
+    """
+    # Calculate default limit per type (always TOTAL_INDICATOR_LIMIT / total_indicator_types)
+    default_limit_per_type = TOTAL_INDICATOR_LIMIT // total_indicator_types if total_indicator_types > 0 else TOTAL_INDICATOR_LIMIT
+
+    # If limit is None or negative, use default
+    if limit is None or limit < 0:
+        demisto.debug(
+            f"UNIT42FEED: Limit is None or negative ({limit}), using default limit per type: {default_limit_per_type}"
+        )
+        return default_limit_per_type
+
+    # If limit * types exceeds total limit, use default
+    total_expected = limit * total_indicator_types
+    if total_expected > TOTAL_INDICATOR_LIMIT:
+        demisto.debug(
+            f"UNIT42FEED: Total expected ({total_expected}) exceeds maximum {TOTAL_INDICATOR_LIMIT}. "
+            f"Using default limit per type: {default_limit_per_type}"
+        )
+        return default_limit_per_type
+
+    # Otherwise, use the provided limit
+    demisto.debug(f"UNIT42FEED: Using provided limit per type: {limit}")
+    return limit
 
 
 def fetch_indicator_type(
@@ -942,14 +981,6 @@ def fetch_indicators(client: Client, params: dict, current_time: datetime) -> li
     """
     all_indicators = []
 
-    # Parse and validate limit (this is PER TYPE)
-    limit_per_type = arg_to_number(params.get("limit", DEFAULT_LIMIT))
-    if not limit_per_type or limit_per_type <= 0:
-        limit_per_type = DEFAULT_LIMIT
-    if limit_per_type > TOTAL_INDICATOR_LIMIT:
-        demisto.debug(f"UNIT42FEED: Requested limit {limit_per_type} exceeds maximum {TOTAL_INDICATOR_LIMIT}, using maximum")
-        limit_per_type = TOTAL_INDICATOR_LIMIT
-
     # Get configuration
     feed_types = argToList(params.get("feed_types"))
     indicator_types = argToList(params.get("indicator_types"))
@@ -961,28 +992,20 @@ def fetch_indicators(client: Client, params: dict, current_time: datetime) -> li
     last_run = demisto.getLastRun() or {}
     start_time = last_run.get("last_successful_run", default_start)
 
-    # Calculate total types and validate total doesn't exceed 100K
+    # Calculate total types (including threat objects if enabled)
     total_types = 0
     if "Threat Objects" in feed_types:
         total_types += 1
     if "Indicators" in feed_types:
         total_types += len(indicator_types)
 
-    total_expected = limit_per_type * total_types
-    if total_expected > TOTAL_INDICATOR_LIMIT:
-        # Adjust limit_per_type to not exceed total limit
-        limit_per_type = TOTAL_INDICATOR_LIMIT // total_types
-        demisto.debug(
-            f"UNIT42FEED: Total expected ({total_expected}) exceeds maximum {TOTAL_INDICATOR_LIMIT}. "
-            f"Adjusted limit per type to {limit_per_type}"
-        )
+    # Parse limit from params and calculate limit per type
+    requested_limit = arg_to_number(params.get("limit"))
+    limit_per_type = calculate_limit_per_type(requested_limit, total_types)
 
     demisto.debug(f"UNIT42FEED: Starting fetch with limit_per_type={limit_per_type}, feed_types={feed_types}")
     demisto.debug(f"UNIT42FEED: Total types: {total_types}, max total: {limit_per_type * total_types}")
     demisto.debug(f"UNIT42FEED: Indicator types: {indicator_types}, start_time={start_time}")
-
-    # Calculate the actual total limit (min of 100K or limit_per_type * total_types)
-    actual_total_limit = min(TOTAL_INDICATOR_LIMIT, limit_per_type * total_types)
 
     # Track remaining quota for redistribution to the last type
     remaining_quota = 0
@@ -1008,18 +1031,15 @@ def fetch_indicators(client: Client, params: dict, current_time: datetime) -> li
 
     # FETCH INDICATORS (if enabled) - After Threat Objects
     if "Indicators" in feed_types:
-        # Sort indicator types by priority (IPs first, Files last - bottom-to-top)
         sorted_types = sort_indicator_types_by_priority(indicator_types)
-        demisto.debug(f"UNIT42FEED: Fetching indicators in priority order (bottom-to-top): {sorted_types}")
+        demisto.debug(f"UNIT42FEED: Fetching indicators in priority order: {sorted_types}")
 
         for idx, ind_type in enumerate(sorted_types):
             is_last_type = idx == len(sorted_types) - 1
 
-            # For the last type, add remaining quota to allow fetching up to total limit
-            # But ensure we don't exceed the actual_total_limit
+            # For the last type, add remaining quota
             if is_last_type:
-                max_for_last_type = actual_total_limit - len(all_indicators)
-                type_limit = min(limit_per_type + remaining_quota, max_for_last_type)
+                type_limit = limit_per_type + remaining_quota
             else:
                 type_limit = limit_per_type
 
