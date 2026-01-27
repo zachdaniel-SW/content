@@ -782,7 +782,7 @@ def sort_indicator_types_by_priority(indicator_types: list) -> list:
         Sorted list based on INDICATOR_TYPE_PRIORITY (IPs → Domains → URLs → Files)
     """
     # Create priority map (lower index = higher priority)
-    priority_map = {type_: idx for idx, type_ in enumerate(INDICATOR_TYPE_PRIORITY)}
+    priority_map = {indicator_type: idx for idx, indicator_type in enumerate(INDICATOR_TYPE_PRIORITY)}
 
     # Sort by priority (IPs=0, Domains=1, URLs=2, Files=3)
     return sorted(indicator_types, key=lambda t: priority_map.get(t, len(INDICATOR_TYPE_PRIORITY)))
