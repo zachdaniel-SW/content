@@ -12,6 +12,7 @@ from Unit42Feed import (
     sort_indicator_types_by_priority,
     fetch_indicator_type,
     fetch_threat_objects_with_limit,
+    calculate_limit_per_type,
     INDICATOR_TYPE_MAPPING,
     VERDICT_TO_SCORE,
     VALID_REGIONS,
@@ -20,6 +21,7 @@ from Unit42Feed import (
     INTEGRATION_NAME,
     RETRY_COUNT,
     STATUS_CODES_TO_RETRY,
+    TOTAL_INDICATOR_LIMIT,
 )
 from CommonServerPython import *
 
@@ -1698,3 +1700,128 @@ def test_fetch_indicators_remaining_limit_tracking(client, mocker):
 
     # Should fetch: 60 threat objects + 30 IPs + 10 domains = 100 (URLs and Files skipped)
     assert len(result) == 100
+
+
+def test_calculate_limit_per_type_with_none():
+    """
+    Given:
+        - limit is None
+        - total_indicator_types is 4
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns default limit per type (TOTAL_INDICATOR_LIMIT / total_indicator_types)
+    """
+    result = calculate_limit_per_type(None, 4)
+    expected = TOTAL_INDICATOR_LIMIT // 4  # 100,000 / 4 = 25,000
+    assert result == expected
+    assert result == 25000
+
+
+def test_calculate_limit_per_type_with_negative():
+    """
+    Given:
+        - limit is negative (-100)
+        - total_indicator_types is 5
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns default limit per type (TOTAL_INDICATOR_LIMIT / total_indicator_types)
+    """
+    result = calculate_limit_per_type(-100, 5)
+    expected = TOTAL_INDICATOR_LIMIT // 5  # 100,000 / 5 = 20,000
+    assert result == expected
+    assert result == 20000
+
+
+def test_calculate_limit_per_type_exceeds_total():
+    """
+    Given:
+        - limit is 30,000
+        - total_indicator_types is 4
+        - limit * types = 120,000 > TOTAL_INDICATOR_LIMIT (100,000)
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns default limit per type (TOTAL_INDICATOR_LIMIT / total_indicator_types)
+    """
+    result = calculate_limit_per_type(30000, 4)
+    expected = TOTAL_INDICATOR_LIMIT // 4  # 100,000 / 4 = 25,000
+    assert result == expected
+    assert result == 25000
+
+
+def test_calculate_limit_per_type_within_total():
+    """
+    Given:
+        - limit is 20,000
+        - total_indicator_types is 4
+        - limit * types = 80,000 <= TOTAL_INDICATOR_LIMIT (100,000)
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns the provided limit
+    """
+    result = calculate_limit_per_type(20000, 4)
+    assert result == 20000
+
+
+def test_calculate_limit_per_type_exact_total():
+    """
+    Given:
+        - limit is 25,000
+        - total_indicator_types is 4
+        - limit * types = 100,000 = TOTAL_INDICATOR_LIMIT
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns the provided limit (exactly at the limit)
+    """
+    result = calculate_limit_per_type(25000, 4)
+    assert result == 25000
+
+
+def test_calculate_limit_per_type_single_type():
+    """
+    Given:
+        - limit is None
+        - total_indicator_types is 1
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns TOTAL_INDICATOR_LIMIT (100,000 / 1 = 100,000)
+    """
+    result = calculate_limit_per_type(None, 1)
+    assert result == TOTAL_INDICATOR_LIMIT
+    assert result == 100000
+
+
+def test_calculate_limit_per_type_many_types():
+    """
+    Given:
+        - limit is None
+        - total_indicator_types is 10
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns default limit per type (TOTAL_INDICATOR_LIMIT / 10 = 10,000)
+    """
+    result = calculate_limit_per_type(None, 10)
+    expected = TOTAL_INDICATOR_LIMIT // 10  # 100,000 / 10 = 10,000
+    assert result == expected
+    assert result == 10000
+
+
+def test_calculate_limit_per_type_small_limit():
+    """
+    Given:
+        - limit is 5,000
+        - total_indicator_types is 4
+        - limit * types = 20,000 <= TOTAL_INDICATOR_LIMIT
+    When:
+        - Calling calculate_limit_per_type
+    Then:
+        - Returns the provided limit (5,000)
+    """
+    result = calculate_limit_per_type(5000, 4)
+    assert result == 5000
