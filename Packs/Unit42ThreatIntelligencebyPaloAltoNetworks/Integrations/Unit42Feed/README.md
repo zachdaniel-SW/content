@@ -28,10 +28,10 @@ The limit per type is calculated using the following logic:
 
 1. **If limit is not specified or is negative**:
    - Default limit per type = `100,000 / total_number_of_types`
-   
+
 2. **If limit × total_number_of_types > 100,000**:
    - Adjusted limit per type = `100,000 / total_number_of_types`
-   
+
 3. **Otherwise**:
    - Use the specified limit per type
 
