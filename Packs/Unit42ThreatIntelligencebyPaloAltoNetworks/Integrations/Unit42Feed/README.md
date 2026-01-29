@@ -38,23 +38,27 @@ The limit per type is calculated using the following logic:
 ### Examples
 
 #### Example 1: No Limit Specified with 4 Types
+
 - **Configuration**: Threat Objects + 3 indicator types (IP, Domain, URL)
 - **Total types**: 4
 - **Calculation**: `100,000 / 4 = 25,000` per type
 - **Result**: Fetches up to 25,000 of each type (100,000 total)
 
 #### Example 2: Limit Exceeds Total
+
 - **Configuration**: Limit = 30,000, with 4 types selected
 - **Calculation**: `30,000 × 4 = 120,000 > 100,000` (exceeds total limit)
 - **Adjusted**: `100,000 / 4 = 25,000` per type
 - **Result**: Fetches up to 25,000 of each type (100,000 total)
 
 #### Example 3: Limit Within Total
+
 - **Configuration**: Limit = 20,000, with 4 types selected
 - **Calculation**: `20,000 × 4 = 80,000 ≤ 100,000` (within total limit)
 - **Result**: Fetches up to 20,000 of each type (80,000 total)
 
 #### Example 4: Single Type
+
 - **Configuration**: Limit not specified, only IP indicators selected
 - **Total types**: 1
 - **Calculation**: `100,000 / 1 = 100,000` per type

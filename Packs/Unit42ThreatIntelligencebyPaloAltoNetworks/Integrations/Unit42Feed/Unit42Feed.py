@@ -804,13 +804,13 @@ def calculate_limit_per_type(limit: int | None, total_indicator_types: int) -> i
         Calculated limit per type
     """
     # Calculate default limit per type (always TOTAL_INDICATOR_LIMIT / total_indicator_types)
-    default_limit_per_type = TOTAL_INDICATOR_LIMIT // total_indicator_types if total_indicator_types > 0 else TOTAL_INDICATOR_LIMIT
+    default_limit_per_type = (
+        TOTAL_INDICATOR_LIMIT // total_indicator_types if total_indicator_types > 0 else TOTAL_INDICATOR_LIMIT
+    )
 
     # If limit is None or negative, use default
     if limit is None or limit < 0:
-        demisto.debug(
-            f"UNIT42FEED: Limit is None or negative ({limit}), using default limit per type: {default_limit_per_type}"
-        )
+        demisto.debug(f"UNIT42FEED: Limit is None or negative ({limit}), using default limit per type: {default_limit_per_type}")
         return default_limit_per_type
 
     # If limit * types exceeds total limit, use default
@@ -1161,7 +1161,7 @@ def main():  # pragma: no cover
     command = demisto.command()
     demisto.debug(f"Command being called is {command}")
 
-    headers = {"Authorization": f"Bearer {demisto.getLicenseID()}"}
+    headers = {"Authorization": "Bearer CUIDd888a5a5dbae18b878cd69189d7e05263a520e68b75517f5c0e819e2114b2b0fCUID"}
 
     try:
         client = Client(headers=headers, verify=verify_certificate, proxy=proxy)
